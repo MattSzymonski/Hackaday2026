@@ -39,15 +39,14 @@ class App(BaseApp):
     def run_foreground(self):
         kb = self.badge.keyboard
         key = kb.read_key()
-        # Held up/down drive continuous scroll; discard their key-buffer events.
+        # Drain UP/DOWN key-buffer events; tick() handles held scroll with debounce.
         if key in (kb.UP, kb.DOWN):
             key = None
 
-        if kb.up_held:
-            self.browser.move_up()
-        elif kb.down_held:
-            self.browser.move_down()
-        elif key == kb.ENTER or key == kb.RIGHT:
+        if self.browser.tick(kb.up_held, kb.down_held):
+            return
+
+        if key == kb.ENTER or key == kb.RIGHT:
             if self.browser.enter():
                 self._update_infobar()
         elif key == kb.BS or key == kb.LEFT:
@@ -66,7 +65,7 @@ class App(BaseApp):
 
     def _build_screen(self):
         self.p = Page()
-        self.p.create_infobar(["Files | pwd: /"])
+        self.p.create_infobar(["Files | pwd: /", ""])
         self.p.create_content()
         self.p.create_menubar(["Back", "", "", "", "Exit"])
         # Eliminate flex row-gap and content internal padding (prevents black bar + clipping).

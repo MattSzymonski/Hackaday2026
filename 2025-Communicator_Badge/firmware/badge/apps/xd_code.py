@@ -7,9 +7,6 @@ States:
   Output — scrollable script output, F1=Files, F2=Editor, F5=Menu
 """
 
-import io
-import sys
-
 import lvgl
 
 from apps.base_app import BaseApp
@@ -114,7 +111,7 @@ class App(BaseApp):
 
     def _build_menu(self):
         self.p = Page()
-        self.p.create_infobar(["XD Code"])
+        self.p.create_infobar(["XD Code", ""])
         self.p.create_content()
         self.p.create_menubar(["Files", "", "", "", "Exit"])
         self._apply_layout_fixes()
@@ -123,7 +120,13 @@ class App(BaseApp):
         title.set_style_text_font(lvgl.font_montserrat_16, 0)
         title.set_style_text_color(styles.lcd_color_fg, 0)
         title.set_text("XD Code")
-        title.align(lvgl.ALIGN.CENTER, 0, 0)
+        title.align(lvgl.ALIGN.CENTER, 0, -14)
+
+        subtitle = lvgl.label(self.p.content)
+        subtitle.set_style_text_font(lvgl.font_montserrat_12, 0)
+        subtitle.set_style_text_color(styles.lcd_color_fg, 0)
+        subtitle.set_text("Not great, not terrible IDE")
+        subtitle.align(lvgl.ALIGN.CENTER, 0, 10)
 
         self.p.replace_screen()
 
@@ -159,11 +162,10 @@ class App(BaseApp):
         if key in (kb.UP, kb.DOWN):
             key = None
 
-        if kb.up_held:
-            self.browser.move_up()
-        elif kb.down_held:
-            self.browser.move_down()
-        elif key == kb.ENTER or key == kb.RIGHT:
+        if self.browser.tick(kb.up_held, kb.down_held):
+            return
+
+        if key == kb.ENTER or key == kb.RIGHT:
             entry = self.browser.selected_entry
             if entry is not None:
                 name, is_dir = entry
@@ -263,36 +265,28 @@ class App(BaseApp):
             print("XDCode save error:", e)
 
     def _run_script(self):
-        """Auto-save, exec the script capturing stdout/stderr, then switch to Output."""
+        """Auto-save, exec the script capturing output via print override, then switch to Output."""
         self._save_file()
         self._output_name = self._filepath.rsplit("/", 1)[-1] if self._filepath else "(script)"
 
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
+        output_lines = []
 
-        # stderr redirect is optional — not all MicroPython builds expose it
-        old_stderr = None
-        has_stderr = False
-        try:
-            old_stderr = sys.stderr
-            sys.stderr = buf
-            has_stderr = True
-        except AttributeError:
-            pass
+        def _capture_print(*args, **kwargs):
+            sep = kwargs.get("sep", " ")
+            end = kwargs.get("end", "\n")
+            line = sep.join(str(a) for a in args) + end
+            # Split on newlines but keep partial lines together
+            for part in line.split("\n"):
+                output_lines.append(part)
 
         try:
             with open(self._filepath, "r") as f:
                 code = f.read()
-            exec(code, {"__name__": "__main__"})  # noqa: S102
+            exec(code, {"__name__": "__main__", "print": _capture_print})  # noqa: S102
         except Exception as exc:
-            buf.write("[Error] " + str(exc) + "\n")
-        finally:
-            sys.stdout = old_stdout
-            if has_stderr:
-                sys.stderr = old_stderr
+            output_lines.append("[Error] " + str(exc))
 
-        self._output_lines = buf.getvalue().split("\n")
+        self._output_lines = output_lines if output_lines else ["(no output)"]
         self._output_offset = 0
         self._goto(_STATE_OUTPUT)
 

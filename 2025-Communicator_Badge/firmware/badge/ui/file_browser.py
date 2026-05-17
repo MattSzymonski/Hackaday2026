@@ -62,6 +62,9 @@ class FileBrowser:
         Width in pixels of the scrollbar strip (default 4).
     """
 
+    # Frames of up/down held before repeat scrolling begins (~320 ms at 80 ms/frame).
+    HOLD_DELAY = 4
+
     def __init__(self, container, visible_rows,
                  row_h=_ROW_H_DEFAULT, scrollbar_w=_SCROLLBAR_W_DEFAULT):
         self._container = container
@@ -76,6 +79,9 @@ class FileBrowser:
         self._row_labels = []
         self._scrollbar_track = None
         self._scrollbar_thumb = None
+
+        self._up_frames = 0    # held-scroll debounce counters
+        self._down_frames = 0
 
         self._setup_scrollbar()
         self._load_entries()
@@ -129,6 +135,25 @@ class FileBrowser:
             self._update_scroll()
             self._render_list()
             return True
+        return False
+
+    def tick(self, up_held, down_held):
+        """Call once per frame with held-key states.  Moves selection with a hold
+        delay so a quick tap moves exactly one row instead of N frames worth.
+        Returns ``True`` if selection moved."""
+        if up_held:
+            self._up_frames += 1
+            self._down_frames = 0
+            if self._up_frames == 1 or self._up_frames > self.HOLD_DELAY:
+                return self.move_up()
+        elif down_held:
+            self._down_frames += 1
+            self._up_frames = 0
+            if self._down_frames == 1 or self._down_frames > self.HOLD_DELAY:
+                return self.move_down()
+        else:
+            self._up_frames = 0
+            self._down_frames = 0
         return False
 
     def enter(self):
