@@ -52,6 +52,7 @@ class App(BaseApp):
         self._last_servo_angle = None   # track last sent value, avoid redundant PWM writes
         self._servo_pos        = 0.0    # current servo position (deg, 0-180), rate-limited
         self._limiter_active   = False  # True when software speed limiter is engaging
+        self._servo_dirty      = False  # True when angle was set externally and servo needs to catch up
         # Set-mode state
         self._set_mode       = False
         self._set_textarea   = None
@@ -78,7 +79,7 @@ class App(BaseApp):
         self._last_servo_angle = int(self._servo_pos)
 
         self.page = Page()
-        self.page.create_infobar(["Rotation", ""])
+        self.page.create_infobar(["Rooootation", ""])
         self.page.create_content()
         self.page.create_menubar(["Set", "Spd-", "R:Auto", "Spd+", "Back"])
 
@@ -182,7 +183,7 @@ class App(BaseApp):
             changed = True
 
         # Always update display when auto-rotating, otherwise only on change
-        if self.auto or changed:
+        if self.auto or changed or self._servo_dirty:
             # Rate-limited servo update: step servo_pos toward target each tick
             target = self.angle + 90.0   # -90→ 0, 0→90, +90→180
             max_step = SERVO_MAX_DEG_S * SERVO_TICK_S
@@ -196,7 +197,9 @@ class App(BaseApp):
                 if new_int != self._last_servo_angle:
                     self._servo_write_deg(self._servo_pos)
                     self._last_servo_angle = new_int
+                self._servo_dirty = abs(target - self._servo_pos) > 0.5  # keep dirty until arrived
             else:
+                self._servo_dirty = False
                 self._limiter_active = (self.speed >= SPEED_LIMIT)
             self._update_display()
 
@@ -236,7 +239,7 @@ class App(BaseApp):
         # Hide main content widgets
         for w in (self._arc, self._angle_lbl, self._speed_lbl, self._auto_lbl, self._limiter_lbl):
             if w:
-                w.add_flag(lvgl.OBJ_FLAG.HIDDEN)
+                w.set_style_opa(0, 0)
 
         # Update menubar
         self.page.set_menubar_button_label(0, "")
@@ -272,6 +275,7 @@ class App(BaseApp):
                 raw = self._set_textarea.get_text().strip()
                 val = float(raw)
                 self.angle = max(ANGLE_MIN, min(ANGLE_MAX, val))
+                self._servo_dirty = True
             except Exception:
                 pass
 
@@ -289,7 +293,7 @@ class App(BaseApp):
         for w in (self._arc, self._angle_lbl, self._speed_lbl, self._auto_lbl, self._limiter_lbl):
             if w:
                 try:
-                    w.clear_flag(lvgl.OBJ_FLAG.HIDDEN)
+                    w.set_style_opa(255, 0)
                 except Exception:
                     pass
 
@@ -314,7 +318,7 @@ class App(BaseApp):
 
     # ------------------------------------------------------------------
     def _angle_str(self):
-        return f"{self.angle:+07.2f} deg"
+        return f"{self.angle:+06.2f} deg"
 
     def _speed_str(self):
         return f"Speed: {self.speed:.0f} deg/s"

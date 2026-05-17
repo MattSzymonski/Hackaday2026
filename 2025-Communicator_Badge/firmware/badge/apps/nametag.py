@@ -9,6 +9,8 @@ from ui.page import Page
 import ui.styles as styles
 import lvgl
 import os
+import urandom
+import uctypes
 from ui import graphics
 
 """
@@ -18,6 +20,29 @@ Structdef is the struct library format string. This is a subset of cpython struc
 https://docs.micropython.org/en/latest/library/struct.html
 """
 # NEW_PROTOCOL = Protocol(port=<PORT>, name="<NAME>", structdef="!")
+
+# ---------------------------------------------------------------------------
+# Glitch effect configuration
+# ---------------------------------------------------------------------------
+# Screen physical dimensions (pixels, after display rotation)
+_GLITCH_SCREEN_W = 428
+_GLITCH_SCREEN_H = 142
+
+# How many pixels to shift the glitched band to the right
+_GLITCH_SHIFT_PX = 35
+
+# Randomised height of each glitch band (pixels)
+_GLITCH_BAND_H_MIN = 15
+_GLITCH_BAND_H_MAX = 50
+
+# How many run_foreground frames the glitch is visible (each frame ~100 ms)
+_GLITCH_FRAMES_MIN = 1   # ~200 ms
+_GLITCH_FRAMES_MAX = 5   # ~600 ms
+
+# How many frames of quiet between glitches
+_GLITCH_COOLDOWN_MIN = 10  # ~1 s
+_GLITCH_COOLDOWN_MAX = 30  # ~4 s
+# ---------------------------------------------------------------------------
 
 
 class App(BaseApp):
@@ -57,6 +82,17 @@ class App(BaseApp):
         self.headshot_index = 0
         self.picker_image = None
         self.picker_label = None
+        # Fullscreen glitch effect state
+        self.glitch_active = False
+        self.glitch_overlay = None
+        self.glitch_count = 0
+        self.glitch_target = 0
+        self.cooldown_count = 0
+        self.cooldown_target = 0
+        self._fs_label = None
+        self._fs_headshot = None
+        self._glitch_band_buf = None   # keep ref so GC won't collect it
+        self._glitch_img_dsc = None
         ## Small state machine to handle button presses in the app
         self.app_states = [
             "default",
@@ -133,29 +169,37 @@ class App(BaseApp):
             self.fullscreen.set_height(lvgl.pct(100))
 
             # Build fullscreen content: image on the left, name on the right (no scaling)
-            fs_headshot = None
+            self._fs_headshot = None
             if self.show_image and self.image_path:
                 try:
-                    fs_headshot = graphics.create_image(self.image_path, self.fullscreen)
-                    fs_headshot.set_style_radius(40, 0)
-                    fs_headshot.align(lvgl.ALIGN.LEFT_MID, 10, 0)
+                    self._fs_headshot = graphics.create_image(self.image_path, self.fullscreen)
+                    self._fs_headshot.set_style_radius(40, 0)
+                    self._fs_headshot.align(lvgl.ALIGN.LEFT_MID, 10, 0)
                 except Exception as e:
                     print("Nametag FS image load failed:", e)
-                    fs_headshot = None
+                    self._fs_headshot = None
 
-            fs_label = lvgl.label(self.fullscreen)
-            fs_label.set_style_text_font(self.font, lvgl.STATE.DEFAULT)
-            if fs_headshot:
+            self._fs_label = lvgl.label(self.fullscreen)
+            self._fs_label.set_style_text_font(self.font, lvgl.STATE.DEFAULT)
+            if self._fs_headshot:
                 numlines = self.username.count("\n") + 1
                 if numlines == 1:
-                    fs_label.align_to(fs_headshot, lvgl.ALIGN.OUT_RIGHT_MID, 10, 0)
+                    self._fs_label.align_to(self._fs_headshot, lvgl.ALIGN.OUT_RIGHT_MID, 10, 0)
                 elif numlines == 2:
-                    fs_label.align_to(fs_headshot, lvgl.ALIGN.OUT_RIGHT_MID, 10, -30)
+                    self._fs_label.align_to(self._fs_headshot, lvgl.ALIGN.OUT_RIGHT_MID, 10, -30)
                 else:
-                    fs_label.align_to(fs_headshot, lvgl.ALIGN.OUT_RIGHT_TOP, 10, -20)
+                    self._fs_label.align_to(self._fs_headshot, lvgl.ALIGN.OUT_RIGHT_TOP, 10, -20)
             else:
-                fs_label.align(lvgl.ALIGN.CENTER, 0, 0)
-            fs_label.set_text(self.username)
+                self._fs_label.align(lvgl.ALIGN.CENTER, 0, 0)
+            self._fs_label.set_text(self.username)
+
+            # Initialize glitch counters
+            self.glitch_active = False
+            self.glitch_overlay = None
+            self.glitch_count = 0
+            self.glitch_target = 0
+            self.cooldown_count = 0
+            self.cooldown_target = urandom.randint(_GLITCH_COOLDOWN_MIN, _GLITCH_COOLDOWN_MAX)
 
             self.app_state = self.app_states.index("in_fullscreen")
 
@@ -167,8 +211,23 @@ class App(BaseApp):
                 or self.badge.keyboard.f4()
                 or self.badge.keyboard.f5()
             ):
+                self._stop_glitch()
                 self.fullscreen.delete()
                 self.app_state = self.app_states.index("default")
+            else:
+                if not self.glitch_active:
+                    self.cooldown_count += 1
+                    if self.cooldown_count % 5 == 0:
+                        print(f"[glitch] cooldown {self.cooldown_count}/{self.cooldown_target}")
+                    if self.cooldown_count >= self.cooldown_target:
+                        print("[glitch] cooldown expired -> _start_glitch")
+                        self._start_glitch()
+                else:
+                    self.glitch_count += 1
+                    print(f"[glitch] active frame {self.glitch_count}/{self.glitch_target}")
+                    if self.glitch_count >= self.glitch_target:
+                        print("[glitch] glitch expired -> _stop_glitch")
+                        self._stop_glitch()
 
         ## Scaffolding here for changing fonts on the fly. Check out the git repo for updates.
         ## Amaze your friends and confound your enemies!
@@ -404,6 +463,182 @@ class App(BaseApp):
                 # Rebuild main content
                 self.switch_to_foreground()
                 return
+
+    def _start_glitch(self):
+        """Snapshot the fullscreen pixels, shift a random band of rows right in the buffer, overlay as image."""
+        SCREEN_W = _GLITCH_SCREEN_W
+        SCREEN_H = _GLITCH_SCREEN_H
+        SHIFT_PX = _GLITCH_SHIFT_PX
+        ROW_BYTES = SCREEN_W * 2  # RGB565: 2 bytes per pixel
+
+        band_h = urandom.randint(_GLITCH_BAND_H_MIN, _GLITCH_BAND_H_MAX)
+        band_y = urandom.randint(0, max(1, SCREEN_H - band_h))
+        print(f"[glitch] _start_glitch band_y={band_y} band_h={band_h}")
+
+        # --- Step 1: probe snapshot API availability ---
+        has_snapshot = hasattr(lvgl, "snapshot_take")
+        has_snapshot_obj = hasattr(lvgl, "snapshot")
+        print(f"[glitch] lvgl.snapshot_take={has_snapshot} lvgl.snapshot={has_snapshot_obj}")
+
+        snap = None
+        if has_snapshot:
+            try:
+                snap = lvgl.snapshot_take(self.fullscreen, lvgl.COLOR_FORMAT.RGB565)
+                print(f"[glitch] snapshot_take result: {snap}, type={type(snap)}")
+                if snap is not None:
+                    print(f"[glitch] snap attrs: data={getattr(snap,'data','N/A')} data_size={getattr(snap,'data_size','N/A')}")
+            except Exception as e:
+                print(f"[glitch] snapshot_take exception: {e}")
+                snap = None
+        elif has_snapshot_obj:
+            try:
+                snap = lvgl.snapshot.take(self.fullscreen, lvgl.COLOR_FORMAT.RGB565)
+                print(f"[glitch] snapshot.take result: {snap}")
+            except Exception as e:
+                print(f"[glitch] snapshot.take exception: {e}")
+                snap = None
+
+        if snap is None:
+            print("[glitch] snapshot unavailable - aborting glitch this cycle")
+            self.glitch_active = True
+            self.glitch_count = 0
+            self.glitch_target = 1
+            return
+
+        # --- Step 2: get the raw bytes from C_Array ---
+        # snap.data is a C uint8_t* pointer. memoryview() gives 4 bytes (the pointer address).
+        # We must read those 4 bytes as a little-endian uint32 then dereference with uctypes.
+        raw = None
+        try:
+            data_val = snap.data
+            data_size = snap.data_size
+            print(f"[glitch] data type={type(data_val)} size={data_size}")
+            if isinstance(data_val, int):
+                raw = uctypes.bytearray_at(data_val, data_size)
+                print(f"[glitch] uctypes(int) OK len={len(raw)}")
+            elif isinstance(data_val, (bytes, bytearray, memoryview)):
+                raw = data_val
+                print(f"[glitch] bytes-like len={len(raw)}")
+            else:
+                # C_Array: memoryview gives the 4-byte pointer value, not the data
+                mv = memoryview(data_val)
+                if len(mv) == 4:
+                    ptr_addr = mv[0] | (mv[1] << 8) | (mv[2] << 16) | (mv[3] << 24)
+                    print(f"[glitch] deref ptr 0x{ptr_addr:08x}")
+                    raw = uctypes.bytearray_at(ptr_addr, data_size)
+                    print(f"[glitch] uctypes deref OK len={len(raw)}")
+                else:
+                    # Full data in memoryview directly
+                    raw = mv
+                    print(f"[glitch] memoryview direct len={len(raw)}")
+        except Exception as e:
+            print(f"[glitch] buffer access exception: {e}")
+
+        if raw is None or len(raw) < (band_y + band_h) * ROW_BYTES:
+            print(f"[glitch] raw buffer too small or None: {len(raw) if raw else 'None'}, need {(band_y+band_h)*ROW_BYTES}")
+            snap = None  # allow GC
+            self.glitch_active = True
+            self.glitch_count = 0
+            self.glitch_target = 1
+            return
+
+        # --- Step 3: build glitched band buffer ---
+        SHIFT_BYTES = SHIFT_PX * 2
+        band_buf = bytearray(band_h * ROW_BYTES)  # zeroed = black fill on left
+        copy_len = ROW_BYTES - SHIFT_BYTES
+        for row in range(band_h):
+            src_off = (band_y + row) * ROW_BYTES
+            dst_off = row * ROW_BYTES
+            band_buf[dst_off + SHIFT_BYTES : dst_off + ROW_BYTES] = raw[src_off : src_off + copy_len]
+        print(f"[glitch] band_buf built len={len(band_buf)}")
+
+        # Release snapshot — no official free API in this build; drop reference for GC
+        raw = None
+        snap = None
+
+        # --- Step 4: probe image_dsc_t header format ---
+        # Try nested header first (LVGL 9), fall back to flat (older bindings)
+        try:
+            magic = lvgl.IMAGE_HEADER_MAGIC
+        except AttributeError:
+            magic = 0x19
+        print(f"[glitch] magic=0x{magic:02x}")
+
+        self._glitch_band_buf = band_buf
+
+        # Try nested header format
+        img_dsc = None
+        try:
+            img_dsc = lvgl.image_dsc_t({
+                "header": {
+                    "magic": magic,
+                    "cf": int(lvgl.COLOR_FORMAT.RGB565),
+                    "flags": 0,
+                    "w": SCREEN_W,
+                    "h": band_h,
+                    "stride": ROW_BYTES,
+                },
+                "data_size": len(band_buf),
+                "data": band_buf,
+            })
+            print(f"[glitch] image_dsc_t (nested header) OK: {img_dsc}")
+        except Exception as e:
+            print(f"[glitch] image_dsc_t nested header failed: {e}")
+            img_dsc = None
+
+        if img_dsc is None:
+            # Try flat format (may work for some binding versions)
+            try:
+                img_dsc = lvgl.image_dsc_t({
+                    "data_size": len(band_buf),
+                    "data": band_buf,
+                })
+                print(f"[glitch] image_dsc_t (flat) OK: {img_dsc}")
+            except Exception as e:
+                print(f"[glitch] image_dsc_t flat failed: {e}")
+                img_dsc = None
+
+        self._glitch_img_dsc = img_dsc
+        if img_dsc is None:
+            print("[glitch] could not create image_dsc_t at all")
+            self._glitch_band_buf = None
+            self.glitch_active = True
+            self.glitch_count = 0
+            self.glitch_target = 1
+            return
+
+        # --- Step 5: create overlay image widget ---
+        try:
+            self.glitch_overlay = lvgl.image(self.fullscreen)
+            print(f"[glitch] lvgl.image widget created: {self.glitch_overlay}")
+            self.glitch_overlay.set_src(img_dsc)
+            print("[glitch] set_src OK")
+            self.glitch_overlay.set_pos(0, band_y)
+            print(f"[glitch] set_pos(0, {band_y}) OK")
+        except Exception as e:
+            print(f"[glitch] overlay widget exception: {e}")
+            self.glitch_overlay = None
+            self._glitch_band_buf = None
+            self._glitch_img_dsc = None
+
+        self.glitch_active = True
+        self.glitch_count = 0
+        self.glitch_target = urandom.randint(_GLITCH_FRAMES_MIN, _GLITCH_FRAMES_MAX)
+        print(f"[glitch] done. overlay={self.glitch_overlay} target_frames={self.glitch_target}")
+
+    def _stop_glitch(self):
+        """Remove the glitch overlay, release buffer refs, arm next cooldown."""
+        if self.glitch_overlay is not None:
+            try:
+                self.glitch_overlay.delete()
+            except Exception:
+                pass
+            self.glitch_overlay = None
+        self._glitch_img_dsc = None
+        self._glitch_band_buf = None  # safe to GC now that the widget is deleted
+        self.glitch_active = False
+        self.cooldown_count = 0
+        self.cooldown_target = urandom.randint(_GLITCH_COOLDOWN_MIN, _GLITCH_COOLDOWN_MAX)
 
     def run_background(self):
         """App behavior when running in the background.

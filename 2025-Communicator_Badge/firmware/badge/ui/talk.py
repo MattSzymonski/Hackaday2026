@@ -22,7 +22,9 @@ class Talk(Page):
         headshot_path = talk_dict["headshot"]
         try:
             self.headshot_box = graphics.create_image(headshot_path, self.content)
-        except Exception:
+            print(f"Headshot loaded: {headshot_path}")
+        except Exception as e:
+            print(f"Headshot failed ({headshot_path}): {e}, using wrencher")
             self.headshot_box = graphics.create_image("images/headshots/wrencher.png", self.content)
         self.headshot_box.set_style_radius(40, 0) ## circle at 100x100
         self.headshot_box.align(lvgl.ALIGN.RIGHT_MID, -10, 0)  # align right, center
@@ -78,8 +80,9 @@ class Talk(Page):
             self.headshot_box = None
         try:
             self.headshot_box = graphics.create_image(talk_dict["headshot"], self.content)
-        except Exception:
-            print(f"Headshot not found: {talk_dict['headshot']}, using wrencher fallback")
+            print(f"Headshot loaded: {talk_dict['headshot']}")
+        except Exception as e:
+            print(f"Headshot not found: {talk_dict['headshot']} ({e}), using wrencher fallback")
             self.headshot_box = graphics.create_image("images/headshots/wrencher.png", self.content)
         self.headshot_box.set_style_radius(40, 0) ## circle at 100x100
         self.headshot_box.align(lvgl.ALIGN.RIGHT_MID, -10, 0)  # align right, center

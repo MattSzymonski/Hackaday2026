@@ -13,8 +13,12 @@ import sys
 import time
 from typing import Iterable
 
+# Always run relative to the firmware/ directory (parent of scripts/)
+os.chdir(pathlib.Path(__file__).resolve().parent.parent)
+
 MPREMOTE = [sys.executable, "-m", "mpremote"]
-MPREMOTE_DELAY = 0.5  # seconds between mpremote calls to let badge recover
+MPREMOTE_DELAY = 1.5   # seconds between mpremote calls to let badge recover
+MPREMOTE_RETRIES = 5  # number of times to retry the first connection
 
 
 def mpremote(*args, **kwargs):
@@ -54,16 +58,37 @@ def format_recursive_path(name: str) -> str:
 
 def get_badge_files() -> dict[str, str]:
     """Get the files on the badge and their checksums."""
-    badge_files_text = mpremote("run", "./scripts/check_filesystem.py", capture_output=True, text=True).stdout
+    for attempt in range(MPREMOTE_RETRIES):
+        result = mpremote("run", "./scripts/check_filesystem.py", capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            break
+        print(f"Badge not ready, retrying ({attempt + 1}/{MPREMOTE_RETRIES})...")
+        time.sleep(2.0)
+    else:
+        print("ERROR: Could not connect to badge after retries. Is it plugged in and not held by another program?")
+        sys.exit(1)
+    badge_files_text = result.stdout
     badge_files = {}
+    skipped = 0
     for line in badge_files_text.split("\n"):
-        if " " in line:
-            try:
-                name, checksum = line.split(" ")
-                badge_files[name] = checksum.strip()[2:-1]
-            except ValueError as err:
-                print(err)
-                print(line)
+        line = line.strip()
+        if not line:
+            continue
+        # Expected format: "/path/to/file b'hexhash'" or "/path/to/dir b''"
+        space_idx = line.rfind(" ")  # use rfind so paths with spaces still work
+        if space_idx == -1:
+            skipped += 1
+            continue
+        name = line[:space_idx]
+        checksum_raw = line[space_idx + 1:].strip()
+        # Strip b' prefix and ' suffix: b'abcd' -> abcd
+        if checksum_raw.startswith("b'") and checksum_raw.endswith("'"):
+            checksum = checksum_raw[2:-1]
+        else:
+            checksum = checksum_raw
+        badge_files[name] = checksum
+    if args.verbose and skipped:
+        print(f"  (skipped {skipped} unrecognised lines from badge output)")
     return badge_files
 
 if __name__ == "__main__":

@@ -1,12 +1,12 @@
-"""App that displays 'Unreal SUCKS!' on the screen."""
+"""App that displays the PillEngine logo image on the screen."""
 
 import lvgl
 
 from apps.base_app import BaseApp
 from ui.page import Page
+from ui import graphics
 
-APP_NAME = "UnrealSUCKS"
-
+APP_NAME = "Pill"
 
 class App(BaseApp):
 
@@ -17,14 +17,12 @@ class App(BaseApp):
     def switch_to_foreground(self):
         super().switch_to_foreground()
         self.page = Page()
-        self.page.create_infobar(["Unreal SUCKS!", ""])
+        self.page.create_infobar(["PillEngine ROCKS!", ""])
         self.page.create_content()
         self.page.create_menubar(["", "", "", "", "Back"])
 
-        label = lvgl.label(self.page.content)
-        label.set_text("Unreal SUCKS!")
-        label.set_style_text_font(lvgl.font_montserrat_28, 0)
-        label.align(lvgl.ALIGN.CENTER, 0, 0)
+        img = graphics.create_image("images/pill_logo_white.png", self.page.content)
+        img.align(lvgl.ALIGN.CENTER, 0, 0)
 
         self.page.replace_screen()
 
