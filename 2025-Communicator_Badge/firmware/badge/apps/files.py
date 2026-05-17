@@ -66,7 +66,7 @@ class App(BaseApp):
 
     def _build_screen(self):
         self.p = Page()
-        self.p.create_infobar(["/", "Files"])
+        self.p.create_infobar(["Files | pwd: /"])
         self.p.create_content()
         self.p.create_menubar(["Back", "", "", "", "Exit"])
         # Eliminate flex row-gap and content internal padding (prevents black bar + clipping).
@@ -78,4 +78,4 @@ class App(BaseApp):
         self.p.replace_screen()
 
     def _update_infobar(self):
-        self.p.infobar_left.set_text(self.browser.pwd)
+        self.p.infobar_left.set_text("Files | pwd: " + self.browser.pwd)
